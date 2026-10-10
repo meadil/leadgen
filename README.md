@@ -128,8 +128,3 @@ it's the wrong shape for finding founders — it surfaces developers. The other
 adapters exist to solve that.
 
 `LESSONS_LEARNED.md` is 35 KB of hard-won bugs. Read it first.
-
----
-
-Built because hours for ten leads doesn't scale, and because outreach that
-ignores who someone is doesn't get replies.
