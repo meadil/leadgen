@@ -1,0 +1,17 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Local state
+.source_checkpoints.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

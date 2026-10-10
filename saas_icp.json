@@ -1,0 +1,27 @@
+{
+  "icp_name": "SaaS decision-makers (global test)",
+  "industry": "SaaS",
+  "company_size_employees_min": 10,
+  "company_size_employees_max": 100,
+  "geography_countries": ["United States", "United Kingdom", "Canada", "Germany", "Netherlands", "India", "Singapore", "Australia"],
+  "geography_regions_cities": [],
+  "business_model": "B2B",
+  "job_titles": ["Founder", "Co-Founder", "CEO", "Head of Growth", "VP Marketing"],
+  "seniority_level": "c_level",
+  "department": "founder",
+  "decision_authority": "decision_maker",
+  "trigger_events": ["recently_funded", "product_launch"],
+  "trigger_recency_days_max": 60,
+  "pain_indicators": ["manual outreach", "small team", "no dedicated sales hire", "scaling growth"],
+  "pain_indicator_sources": ["website_copy", "social_posts"],
+  "excluded_industries": ["Government", "Non-profit"],
+  "already_in_crm": true,
+  "field_weights": {
+    "industry": 0.25,
+    "job_titles": 0.2,
+    "geography": 0.15,
+    "pain_indicators": 0.15,
+    "company_size": 0.25
+  },
+  "minimum_score_threshold": 50
+}

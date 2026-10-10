@@ -1,0 +1,8 @@
+requests
+pydantic>=2
+python-dotenv
+supabase
+rapidfuzz
+dnspython
+beautifulsoup4
+flask

@@ -1,0 +1,297 @@
+LEAD GENERATION SYSTEM — PROJECT STATUS / HANDOFF NOTES
+=========================================================
+Written for: continuing this build with a different (local) AI agent.
+Everything below reflects the real state of the project, including bugs
+that are fixed-but-unconfirmed and things that are flat-out broken.
+
+
+1. THE GOAL
+------------
+Build a complete, ~$0 lead generation + CRM + outreach system, because
+manual lead generation was too slow (hours for 8-10 leads).
+
+Three components, working as one pipeline:
+  1. Lead generation engine — finds leads matching an ICP automatically.
+  2. CRM (Supabase) — stores every lead + every message + every reply,
+     with enough detail that an AI can read one lead's full context and
+     know what to say next.
+  3. Message engine — drafts + iterates outreach (email/DM), with a
+     feedback loop: what gets logged in the CRM should teach the system
+     what messaging patterns actually get replies.
+
+Hard constraints throughout: free tools only, prefer things that run
+locally, no paid APIs unless there's truly no free alternative.
+
+
+2. THE END GOAL
+----------------
+A mostly-automated pipeline: on a schedule, it finds new leads, scores
+them against an ICP, writes qualified ones to the CRM, drafts outreach
+messages using each lead's full context, and sends only the messages a
+human has explicitly approved. The niche is SaaS founders/decision-makers
+(not developers — this was a real correction made partway through: the
+first working source, GitHub, was the wrong shape for the niche).
+
+
+3. WHAT HAS BEEN BUILT (all files live in this leadgen/ folder)
+------------------------------------------------------------------
+
+ICP (Ideal Customer Profile) system:
+  - icp_schema.py — Pydantic model + loader that validates an ICP JSON
+    file. Nothing runs on an incomplete ICP.
+  - example_icp.json — throwaway test ICP (Dhaka technical founders,
+    used only to prove the pipeline mechanics work).
+  - saas_icp.json — the REAL ICP: SaaS founders/decision-makers,
+    8 countries, industry=SaaS. This is the one that should actually be
+    used going forward.
+  - icp-definition-schema.md — the human-readable field reference doc
+    icp_schema.py is based on (given earlier in the chat, should be
+    copied into this folder if it isn't already — the code doesn't read
+    it directly, it's documentation).
+
+Lead generation engine (5 stages, all wired in main.py):
+  - models.py — RawCandidate: the shared shape every source adapter
+    returns.
+  - adapters/base.py — SourceAdapter interface every source implements.
+  - adapters/github_adapter.py — Stage 2, working. Searches GitHub by
+    location + job title keywords. Wrong niche fit (finds developers,
+    not SaaS founders) but was useful for proving the pipeline works.
+  - adapters/producthunt_adapter.py — Stage 2, BUILT BUT NEVER TESTED.
+    Needs a free PRODUCTHUNT_TOKEN (from
+    api.producthunt.com/v2/oauth/applications) that has not been
+    obtained/tried yet. Much better fit for the SaaS niche — pulls
+    makers of products under a topic (e.g. "saas").
+  - enrichment.py — Stage 3. Guesses company domain (free Clearbit
+    autocomplete), guesses + MX-checks an email, infers job title from
+    bio text. Email verification hook exists but see section 5 (BROKEN).
+  - scoring.py — Stage 4 (scoring). Weighted scoring against ICP fields
+    (job title, geography, industry, pain indicators). Industry scorer
+    uses a synonym list (not just literal word match) — this was a real
+    bug fix partway through (it originally under-scored obvious SaaS
+    companies that said "SaaS"/"B2B" instead of literally "software").
+  - crm.py — Stage 4 (dedup) + Stage 5 (write). Dedup checks: exact
+    email match, then exact source-URL match (this was added after a
+    real bug — a lead called "Hackerman" with no email/company kept
+    getting re-inserted every run because there was no dedup key for
+    candidates missing both fields), then fuzzy name+domain match as a
+    last resort. Writes qualified leads into Supabase `leads` table.
+  - main.py — orchestrates all 5 stages. Run as:
+        python main.py <icp_file.json> <limit>
+    e.g. python main.py saas_icp.json 100
+
+CRM (Supabase, 4 tables — schema given earlier in chat as crm-schema.sql,
+should also be copied into this folder):
+  - icp_profiles, leads, campaigns, interactions
+  - migration_add_approved.sql — adds an `approved` boolean column to
+    `interactions`. THIS IS THE HUMAN REVIEW GATE — nothing should send
+    until a human flips a row's `approved` to true in Supabase directly
+    (Table Editor). Confirm this migration was actually run.
+  - seed_campaign.sql — creates one starter campaign row so there's a
+    campaign_id to test the message engine with.
+
+Message engine (message_engine/ folder):
+  - gemini_client.py — calls Google Gemini, rotates across multiple API
+    keys (comma-separated in .env) to spread load across your several
+    Google accounts.
+  - context_builder.py — pulls one lead's full record + entire
+    interaction history from Supabase.
+  - generator.py — builds the prompt (auto-detects first-touch vs
+    follow-up based on whether history exists) and calls Gemini.
+  - main.py — entry point. Two modes:
+        python message_engine/main.py <lead_id> <campaign_id>
+            interactive: shows draft, asks y/N/edit before logging
+        python message_engine/main.py --batch <campaign_id> --status new --auto
+            non-interactive (for automation): logs every draft with
+            approved=false, for later human review in Supabase
+
+Sending:
+  - send_approved.py — only sends interactions where approved=true and
+    sent_at is null. Sends via Gmail SMTP app passwords, rotating across
+    multiple accounts (GMAIL_ACCOUNTS in .env, comma-separated
+    email:app_password pairs). Tested once — ran successfully, found 0
+    approved messages (expected, nothing had been approved yet).
+
+Automation (n8n, self-hosted in Docker):
+  - local_runner.py — a small Flask HTTP server that runs on the
+    Windows host (NOT in Docker) and exposes /run-leadgen, /run-draft,
+    /run-send. Exists because n8n's Execute Command node can't see the
+    Windows filesystem/venv from inside its Docker container — n8n calls
+    this instead over http://host.docker.internal:5005.
+  - n8n-lead-gen-system.json — one importable n8n workflow with 3
+    schedule-triggered branches on one canvas: generate leads (daily),
+    draft messages (every 3h, auto mode), send approved (every 30min).
+    IMPORTANT: has a placeholder "REPLACE_WITH_CAMPAIGN_ID" in the draft
+    branch's request body that must be swapped for a real campaign id.
+
+
+4. WHAT IS STILL LEFT TO DO
+------------------------------
+- Get a real PRODUCTHUNT_TOKEN and actually test the Product Hunt
+  adapter — never run once yet.
+- Solve email verification (see bug list below — currently disabled).
+- Run a full end-to-end cycle successfully at least once: generate real
+  SaaS leads -> score/dedup -> draft messages -> human approves a few in
+  Supabase -> confirm send_approved.py actually sends them.
+- Consider adding a Y Combinator company-directory adapter (discussed,
+  never built) — likely a better SaaS source than even Product Hunt for
+  company-level data.
+- No adapter yet reads pain-point/trigger signals well (all current
+  scoring for pain_indicators relies on crude keyword matching against
+  whatever "bio" text a source provides — this is weak and was never
+  upgraded, since the AI deep-enrichment attempt below failed).
+- AI deep-enrichment (reading a lead's website with an AI to judge
+  industry/pain fit properly, instead of keyword matching) was attempted
+  using MiMo-V2.6-Flash via OpenCode Zen, but OpenCode's free tier only
+  works from inside their own client, not from an external script — this
+  was abandoned. deep_enrichment.py was written but is NOT wired into
+  main.py and will not work as-is. If revisited, needs either a paid API
+  or a different free provider.
+- No real leads have been messaged yet. Everything so far has been
+  mechanism-testing, not real outreach.
+
+
+5. BUGS — STATUS AS OF LAST MESSAGE IN THE CHAT
+---------------------------------------------------
+FIXED AND CONFIRMED WORKING:
+  - Windows terminal encoding (garbled em-dashes) — fixed via
+    sys.stdout.reconfigure(encoding="utf-8") in main.py.
+  - Missing load_dotenv() call — fixed, .env now actually gets read.
+  - GitHub adapter silently swallowing rate-limit errors — fixed, now
+    prints the real HTTP status/reason per skipped candidate.
+  - Industry scorer only matching the literal word "software" — fixed
+    with a synonym list (saas/b2b/platform/cloud/app/etc).
+  - "Hackerman" duplicate lead re-inserted every run — fixed by adding a
+    github_url-based dedup check in crm.py, plus a one-time SQL cleanup
+    (migration was given, confirm it was run: delete duplicate github_url
+    rows keeping the oldest).
+  - n8n Execute Command can't reach Windows/venv from Docker — fixed by
+    switching to local_runner.py (Flask on host) + HTTP Request nodes in
+    the n8n workflow.
+
+FIXED BUT NOT YET CONFIRMED (last thing sent, no test result received):
+  - Gemini API call failing with 404. Root cause found: the API key in
+    .env was the wrong TYPE of Google credential — it started with
+    "AQ.Ab8...", but a real Gemini API key starts with "AIzaSy...". Needs
+    a real key generated at aistudio.google.com/apikey.
+  - Model name updated from "gemini-2.0-flash" to "gemini-2.5-flash" in
+    message_engine/gemini_client.py (the old name may not have been
+    valid for this account/region — a commonly reported issue).
+  - local_runner.py crashing with "'NoneType' object is not subscriptable"
+    when running the lead-gen branch — root cause not fully confirmed
+    (best guess: the main.py subprocess call was timing out and
+    subprocess.TimeoutExpired's .stdout attribute was None), but the fix
+    applied guards against None stdout/stderr and explicitly catches
+    TimeoutExpired with a clear "TIMED OUT after Ns" message instead of
+    crashing. NOT YET RE-TESTED.
+
+STILL BROKEN / UNRESOLVED:
+  - Email verification has no working provider. QuickEmailVerification
+    requires a work/business email to sign up (blocked — only have
+    Gmail). Hunter.io was tried as the replacement and ALSO requires a
+    work email to sign up (also blocked). email_verification.py exists
+    and calls Hunter's API, but with no HUNTER_API_KEY set it just
+    returns None silently and the pipeline runs fine without
+    verification — guessed emails are simply never confirmed. NEEDS: a
+    free email verification service that accepts a personal Gmail
+    account for sign-up. This was not found before the chat ended.
+
+
+6. ENVIRONMENT VARIABLES CHECKLIST (.env)
+---------------------------------------------
+SUPABASE_URL                     — set, working
+SUPABASE_SERVICE_KEY             — set, working
+GITHUB_TOKEN                     — set, working (raises adapter to 5000 req/hr)
+GEMINI_API_KEYS                  — WORKING (2026-09-27). New AQ.* auth-key style
+                                     is correct — Google only issues AQ keys now.
+                                     Must be sent via x-goog-api-key header
+                                     (gemini_client.py updated). Key rotation
+                                     across accounts still supported.
+                                     DEFAULT_MODEL is now gemini-3.8-flash with
+                                     automatic fallback to 3.5-flash-lite on
+                                     429/503/timeout.
+PRODUCTHUNT_TOKEN                — SET + TESTED WORKING (2026-09-27). Adapter
+                                     query fixed: old topic{posts{}} field was
+                                     removed by PH — now uses root
+                                     posts(topic:) (see adapters/
+                                     producthunt_adapter.py). Makers default
+                                     to job_title="Founder".
+HUNTER_API_KEY                   — cannot be obtained (needs work email) —
+                                    leave unset until a replacement service
+                                    is found; pipeline works fine without it
+GMAIL_ACCOUNTS                   — SENDER DECIDED 2026-09-27:
+                                     me.iftekhar.adil@gmail.com. Sending stays
+                                     PAUSED. To unpause: create a Gmail App
+                                     Password (needs 2FA) and set
+                                     GMAIL_ACCOUNTS=me.iftekhar.adil@gmail.com:<app_password>
+                                     Format stays email:app_password pairs,
+                                     comma-separated for rotation.
+
+
+7. IMMEDIATE NEXT STEPS, IN ORDER
+--------------------------------------
+1. Get a real Gemini key (aistudio.google.com/apikey), update .env.
+2. Re-run all 3 n8n branches, confirm the local_runner.py timeout fix
+   actually resolves the leadgen crash.
+3. Get a PRODUCTHUNT_TOKEN and test that adapter for the first time.
+4. Find a free email verification service that doesn't require a work
+   email (QuickEmailVerification and Hunter.io both do — try others,
+   e.g. Truelist/Kickbox/Emailable one-time free credits, or a plain
+   MX-check-only approach without third-party verification for now).
+5. Only after 1-3 work: run a full cycle with saas_icp.json, manually
+   approve a couple of drafted messages in Supabase, confirm
+   send_approved.py actually delivers them.
+   (SUPERSEDED 2026-09-27 — see section 8. Sending paused; goal is
+   now multi-ICP volume extraction.)
+
+
+8. SESSION UPDATE — 2026-09-27 (multi-ICP volume machine pivot)
+------------------------------------------------------------------
+GOAL CHANGE: sending paused indefinitely. New goal is max lead
+extraction across MULTIPLE ICPs (incl. small businesses later).
+
+DONE THIS SESSION:
+- Gemini: new AQ key tested 200 on 3.5/3.8-flash + lites.
+  gemini_client.py now uses x-goog-api-key header, model
+  gemini-3.8-flash, fallback chain on 429/503/timeout.
+- local_runner.py: fixed UnicodeDecodeError (cp1252 vs utf-8
+  em-dash) — added encoding="utf-8", errors="replace" to _run.
+  All 3 branches tested via HTTP: /run-send PASS,
+  /run-leadgen PASS, /run-draft works per-lead (full 30+ batch
+  is slow/flaky under Gemini latency).
+- github_adapter.py: search() 403/422 no longer kills the run —
+  skips to next location with a printed reason.
+- producthunt_adapter.py: GraphQL query fixed for current PH
+  schema (root posts(topic:)), makers default job_title=Founder,
+  4 makers verified live.
+- saas_icp.json: threshold 70 -> 50 (PH has no geo signal, real
+  SaaS makers top out ~60: industry 35 + title 25).
+- FIRST REAL CYCLE: 6 PH makers -> 4 written to CRM (Ran
+  Ribenzaft, Nitzan Shapira, S Poorna Prakash, Sahil Bondre),
+  2 blocked. All 4 drafted (approved=False).
+- SEND GATE BUG FOUND + FIXED: interactions.sent_at is NOT NULL
+  default now(), so send_approved's "sent_at is null" filter could
+  NEVER match ("Found 0" was a lie). Gate now uses
+  outcome='pending' -> 'sent'. DB migration run: outcome CHECK
+  now includes 'sent'. (Optionally make sent_at nullable later.)
+- MULTI-ICP: new lead_icps junction table (FKs to leads +
+  icp_profiles, per-ICP score/breakdown), backfilled 36 rows.
+  crm.py: is_linked_to_icp/link_lead_to_icp, insert_lead returns
+  id + writes junction. main.py: global dupes get linked to the
+  new ICP instead of skipped. Re-run verified idempotent.
+  Per-ICP counts: query lead_icps, not leads.icp_profile_id.
+
+STILL OPEN (in order):
+1. PH company_domain is often a producthunt.com URL, not the real
+   domain — enrichment guesses no email. Fix _domain_from_url /
+   prefer maker websiteUrl.
+2. Leads have no emails at all right now -> even unpaused, send
+   skips ("no email on file"). Needs email-finding source.
+3. Email verification still has no provider (Hunter/QuickEmail
+   need work email). Pipeline runs unverified.
+4. Small-business ICPs need NEW sources (PH/GitHub are tech-only).
+   YC directory discussed, never built.
+5. Deep enrichment via OpenCode Zen is dead (free tier client-only)
+   — fails gracefully, non-blocking. Leave off unless a new free
+   AI provider is found.
+6. To unpause sending: GMAIL_ACCOUNTS app password + human
+   approval in Supabase (approved=true) + leads with emails.
